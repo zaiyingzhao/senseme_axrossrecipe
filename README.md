@@ -410,14 +410,12 @@ $ python setup_main.py
 
 ```python
 import base64
-import json
 import pickle
 from collections import deque
 
 import cv2
 import numpy as np
 import pandas as pd
-import requests
 
 from utils import api, client, collect_data, model, standardize
 
