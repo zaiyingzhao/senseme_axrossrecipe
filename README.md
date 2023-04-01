@@ -118,7 +118,7 @@ def set_cap():
     return cap
 ```
 
-次に、`collect_data()`です。カメラから画像を読み込んで、それを特徴量に変換して csv ファイルに書き出しています。
+次に、`collect_data()`です。カメラから画像を読み込んで、それを Face++ API を用いて特徴量に変換し、 csv ファイルに書き出しています。
 
 ```python
 OUTPUT_FOLDER = "./data"
@@ -153,7 +153,7 @@ def collect_data(cap):
                 break
 ```
 
-`collect_data()`内で使われている関数も見てみましょう。`read_img()`ではカメラ画像を読み込んだ後、Face++API を使って特徴量に変換し、csv に書き出すところまでを行っています。途中で出て来る`flatten_dict()`は[こちら](https://www.haya-programming.com/entry/2018/08/30/135041)のブログからお借りしました。返ってくる json が結構ネストされていて扱いにくかったので flat にしてから DataFrame に変換しています。
+`collect_data()`内で使われている関数も見てみましょう。`read_img()`ではカメラ画像を読み込んだ後、Face++API を使って特徴量に変換し、DataFrame にまとめるところまでを行っています。途中で出て来る`flatten_dict()`は[こちら](https://www.haya-programming.com/entry/2018/08/30/135041)のブログからお借りしました。返ってくる json が結構ネストされていて扱いにくかったので flat にしてから DataFrame に変換しています。
 
 ```python
 def read_img(img_bin, frame):
@@ -183,7 +183,7 @@ def read_img(img_bin, frame):
     return len(data["faces"]), df_tmp
 ```
 
-`set_img()`は完全に蛇足なのですが、労働時の様子を撮影しながら何か情報が見えた方が面白いかと思って追加しています。顔の位置を示す長方形と、一番値の高い感情および肌の状態を顔画像に追加しています。
+`set_img()`は完全に蛇足なのですが、労働時の様子を撮影しながら何か情報が見えた方が面白いかと思って追加しています。顔の位置を示す長方形と、一番値の高い感情(emotion)および肌の状態(skinstatus)を顔画像に追加しています。
 ↓ こんな具合になります。(画像は[こちら](https://www.pakutaso.com)のサイトからお借りしています。)
 ![結果](img/res.jpg)
 
@@ -336,7 +336,7 @@ from utils import collect_data
 ```
 
 以上を import してください。
-`make_model()`です。正規化したので、カテゴリ変数がいくつかあるので、それをワンホットエンコーディングします。その後、今回は時系列データを入力として扱っているため、平均をとってからモデルを学習させます。今回は過去 20 件分のデータの平均を入力としました。モデルは xgboost の回帰モデルを使用しています。
+`make_model()`です。正規化したので、顔の位置を示す座標を削除します。またカテゴリ変数がいくつかあるので、それをワンホットエンコーディングします。その後、今回は時系列データを入力として扱っているため、平均をとってからモデルを学習させます。今回は過去 20 件分のデータの平均を入力としました。モデルは xgboost の回帰モデルを使用しています。
 
 ```python
 def make_model():
@@ -372,7 +372,7 @@ def make_model():
     # モデル作成
     reg = xgb.XGBRegressor()
     reg.fit(mean_X, y)
-    pickle.dump(reg, open("./model/model_onda.pkl", "wb"))
+    pickle.dump(reg, open("./model/model.pkl", "wb"))
 ```
 
 `ohe()`は以下のようになっています。
@@ -394,6 +394,150 @@ def ohe(X):
     return X
 ```
 
-以上でデータ集めとモデル作成は終わりです！次は今作成したモデルを使って疲労度を推定してみましょう！
+以上でデータ集めとモデル作成は終わりです！
+
+```bash
+$ python setup_main.py
+```
+
+上記を実行して、しばらく働くとあなたにフィッティングされた疲労度推定モデルが作成されます。
+次は、作成したモデルを使って実際に疲労度を推定してみましょう！
 
 ## 手順 3: 疲労度の推定
+
+以下が疲労度を推定する`calc_tiredness.py`の全体像です。
+モデルを作成した時と同じ要領でカメラ画像を特徴量に変換し、それをモデルに入力することで疲労度を得ています。得られた疲労度を 3 段階にレベルわけ相手の PC に送っています。
+
+```python
+import base64
+import json
+import pickle
+from collections import deque
+
+import cv2
+import numpy as np
+import pandas as pd
+import requests
+
+from utils import api, client, collect_data, model, standardize
+
+
+
+def calc_level(tiredness):
+    if tiredness < 0.33:
+        return 0
+    elif tiredness < 0.67:
+        return 1
+    else:
+        return 2
+
+
+if __name__ == "__main__":
+    # 相手のPCに繋ぐ
+    c = client.connect2server()
+
+    # 記録用ファイル
+    f = open(f"{collect_data.OUTPUT_FOLDER}/tiredness.txt", "w")
+
+    # カメラをセット
+    cap = collect_data.set_cap()
+
+    # 作成したモデルの読み込み
+    reg = pickle.load(open("./model/model.pkl", "rb"))
+
+    # バッファ
+    buf_X = deque()
+    buf_y = deque()
+
+
+    frame = 0
+    while True:
+        frame += 1
+        # カメラ画像読み込み
+        ret, img = cap.read()
+
+        # APIに渡す形式に変更
+        result, dst_data = cv2.imencode(".jpg", img)
+        img_bin = base64.b64encode(dst_data)
+
+        # 画像を特徴量に変換
+        num_face, X = collect_data.read_img(img_bin, frame)
+
+        if not (X is None):
+            # モデルに入れるように整形
+            X = standardize.standardize(X)
+            X = X.drop(
+                [
+                    "frame",
+                    "face_token",
+                    "face_rectangle_top",
+                    "face_rectangle_left",
+                    "face_rectangle_width",
+                    "face_rectangle_height",
+                ],
+                axis=1,
+            )
+            X = model.ohe(X)
+
+            # 過去20行分の平均をとって入力
+            buf_X.append(X.values[0])
+            if len(buf_X) > 20:
+                buf_X.popleft()
+            tiredness = reg.predict(
+                pd.DataFrame([np.array(buf_X).mean(axis=0)], columns=X.columns)
+            )[0]
+
+            # 出力も過去10行分を平均した値にする
+            buf_y.append(tiredness)
+            if len(buf_y) > 10:
+                buf_y.popleft()
+            output = sum(buf_y) / len(buf_y)
+
+            # ファイル出力
+            print(output, file=f)
+
+            # 3段階にレベルわけする
+            tired_level = calc_level(output)
+
+            # 相手のPCに送る
+            client.send2server(c, tired_level)
+
+            cv2.imshow("video", img)
+
+        if cv2.waitKey(1000) & 0xFF == ord("q"):
+            break
+
+    cap.release()
+    f.close()
+    c.close()
+```
+
+相手の PC に送る部分を担っている`utils/client.py`を見てみましょう。`connect2server()`で相手の PC に接続します。`IP`には相手の PC の IP アドレスをセットしてください。`PORT`もなんでも良いですが、相手と揃えてください。そして`send2server()`で相手の PC に値を送ります。
+
+```python
+import socket
+
+IP = "YOUR IP"
+PORT = 51300
+
+def connect2server():
+    c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    c.connect((IP, PORT))
+
+    return c
+
+def send2server(c, tiredness):
+    tiredness_b = tiredness.to_bytes(4, "big")
+    c.send(tiredness_b)
+```
+
+以上で実際に疲労度を推定するところまで終了です!
+
+```bash
+$ python calc_tiredness.py
+```
+
+これを実行することで推定した疲労度を相手の PC に送ることができます。
+次は受け取った値を元にアバターを変化させてみましょう。
+
+## 手順 4: アバターの変化
