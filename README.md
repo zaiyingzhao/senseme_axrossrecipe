@@ -541,3 +541,206 @@ $ python calc_tiredness.py
 次は受け取った値を元にアバターを変化させてみましょう。
 
 ## 手順 4: アバターの変化
+
+### 下準備
+
+#### gif画像の取得
+
+はじめに相手の疲労度を反映させるアバターを取得しましょう。今回は[イラストサイト素材サイト「ぴよたそ」](https://hiyokoyarou.com/)さんのgif画像を利用させていただきます。
+以下のgifファイルをダウンロードし、新たにgifディレクトリを作成した上でgifディレクトリに配置してください。
+- [アバター１疲労度小](https://hiyokoyarou.com/flower-dance-gif/)
+- [アバター１疲労度中](https://hiyokoyarou.com/aruku-gif/)
+- [アバター１疲労度大](https://hiyokoyarou.com/loding-gif/)
+- [アバター２疲労度小](https://hiyokoyarou.com/odoru-penguin/)
+- [アバター２疲労度中](https://hiyokoyarou.com/tobu-penguin/)
+- [アバター２疲労度大](https://hiyokoyarou.com/mimi-furifuri-usagi/)
+
+#### gif画像サイズの統一: `resize.py`
+
+gifディレクトリにある全てのgifファイルのサイズを統一します。今回は900×700のサイズにリサイズを行います。
+
+```python
+from PIL import Image
+import glob
+
+gifs = glob.glob("./gif/*.gif")
+
+for gif in gifs:
+    # アニメーションGIFを読み込む
+    image = Image.open(gif)
+
+    # アニメーションの各フレームをリサイズしてリストに格納
+    resize_image_list = []
+    for index in range(image.n_frames):
+        image.seek(index)
+        resize_image_list.append(image.resize((900, 700)))
+
+    # アニメーションGIFとして書き出し
+    resize_image_list[0].save(
+        gif,
+        save_all=True,
+        append_images=resize_image_list[1:],
+        loop=0,
+    )
+```
+
+```bash
+$ python resize.py
+```
+
+これを実行することで各gif画像がリサイズされ、上書き保存されます。    
+以上で下準備は完了です。それでは実際にgif画像を表示していきましょう！
+
+### 受信した疲労度に基づくアバター表示: `avatar.py`
+
+以下がアバター表示を行う`avatar.py`の全体像です。
+
+```python
+import tkinter as tk
+from time import sleep
+import threading
+import socket
+
+
+class GifPlayer(threading.Thread):
+    def __init__(self, path: str, label: tk.Label):
+        super().__init__(daemon=True)
+        self._please_stop = False
+        self.path = path
+        self.label = label
+        self.duration = []
+        self.frames = []
+        self.last_frame_index = None
+        self.load_frames()
+
+    def load_frames(self):
+        frames = []
+        frame_index = 0
+        try:
+            while True:
+                frames.append(
+                    tk.PhotoImage(file=self.path, format=f"gif -index {frame_index}")
+                )
+                frame_index += 1
+        except Exception:
+            self.frames = frames
+            self.last_frame_index = frame_index - 1
+
+    def run(self):
+        frame_index = 0
+        while not self._please_stop:
+            self.label.configure(image=self.frames[frame_index])
+            frame_index += 1
+            if frame_index > self.last_frame_index:
+                frame_index = 0
+            sleep(0.3)
+
+    def stop(self):
+        self._please_stop = True
+
+
+class TkGif:
+    def __init__(self, path, label: tk.Label) -> None:
+        self.path = path
+        self.label = label
+
+    def play(self):
+        self.player = GifPlayer(self.path, self.label)
+        self.player.start()
+
+    def stop_loop(self):
+        self.player.stop()
+
+
+# gif画像の疲労度に応じた変更
+def update_gif():
+    global gif_player
+    gif_player.stop_loop()
+    gif_player = TkGif(paths[avatar_index][index], label)
+    gif_player.play()
+
+
+# １秒ごとにupdate_gifを実行
+def repeat_func():
+    update_gif()
+    root.after(1000, repeat_func)
+
+
+# change avatarボタンが押されたとき
+def change_avatar():
+    n = len(paths)
+    global avatar_index
+    avatar_index = (avatar_index + 1) % n
+
+
+# 疲労度を受信
+def server():
+    global s
+    global index
+    while True:
+        clientsocket, address = s.accept()
+        print("connection established!")
+        while True:
+            data_b = clientsocket.recv(1024)
+            if not data_b:
+                break
+            index = int.from_bytes(data_b, "big")
+
+        clientsocket.close()
+
+
+if __name__ == "__main__":
+    # ソケット通信の準備
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    PORT = 51300
+    s.bind(("0.0.0.0", PORT))
+    s.listen(1)
+
+    avatar_index = 0
+    index = 0
+
+    # 疲労度の受信を非同期に行う
+    thread_server = threading.Thread(target=server)
+    thread_server.setDaemon(True)
+    thread_server.start()
+
+    paths = [
+        [
+            "./gif/norinoriflower.gif",
+            "./gif/piyopiyo.gif",
+            "./gif/loading-hiyoko.gif",
+        ],
+        [
+            "./gif/odorupen.gif",
+            "./gif/tobipen.gif",
+            "./gif/mimimimi.gif",
+        ],
+    ]
+
+    # GUIアプリケーションの作成
+    root = tk.Tk()
+    root.title("remote-avatar")
+    root.geometry("900x700")
+
+    main_frame = tk.Frame(root)
+    main_frame.pack()
+
+    button = tk.Button(
+        main_frame,
+        text="change avatar",
+        font=("MSゴシック", "11", "bold"),
+        width=15,
+        justify=tk.LEFT,
+        command=change_avatar,
+    )
+    button.pack()
+
+    label = tk.Label(main_frame)
+    label.pack()
+
+    gif_player = TkGif(paths[avatar_index][index], label)
+    gif_player.play()
+
+    repeat_func()
+    root.mainloop()
+```
