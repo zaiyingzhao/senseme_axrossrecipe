@@ -87,7 +87,9 @@ if __name__ == "__main__":
 ```
 
 フォルダ構成は以下のようにして下さい。
+
 ![](img/tree.png)
+
 以下では、utils 内の各機能の実装を見ていきます。
 
 - collect_data.py
