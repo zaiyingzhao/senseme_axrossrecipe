@@ -788,6 +788,9 @@ if __name__ == "__main__":
         command=change_avatar,
     )
     button.pack()
+    
+    label = tk.Label(main_frame)
+    label.pack()
 
     gif_player = TkGif(paths[avatar_index][index], label)
     gif_player.play()
